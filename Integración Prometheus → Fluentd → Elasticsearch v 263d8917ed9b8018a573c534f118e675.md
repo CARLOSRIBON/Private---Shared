@@ -658,9 +658,95 @@ kubectl exec -n assurance elasticsearch-prod-es-data-0 -- curl -k -u elastic:${E
 
 ---
 
-## FASE 5: CONFIGURACIÓN EN KIBANA/GRAFANA
+## FASE 5: MONITOREO Y TROUBLESHOOTING
 
-### 5.1 Index Pattern en Kibana
+### 5.1 Scripts de Monitoreo
+
+```bash
+# Script de monitoreo general
+cat > monitor_prometheus_collector.sh << 'EOF'
+#!/bin/bash
+echo "=== Prometheus Metrics Collector Status ==="
+echo "Date: $(date)"
+echo
+
+# Collector status
+echo "Collector Pod:"
+kubectl get pods -n assurance -l app=prometheus-metrics-collector -o wide
+
+echo -e "\nCollector Logs (last 10 lines):"
+kubectl logs -n assurance -l app=prometheus-metrics-collector --tail=10
+
+# Fluentd status
+echo -e "\nFluentd Pods:"
+kubectl get pods -n assurance -l app=fluentd -o wide
+
+# Services
+echo -e "\nServices:"
+kubectl get svc -n assurance | grep -E "(fluentd|prometheus)"
+
+# Elasticsearch indices
+echo -e "\nElasticsearch Indices:"
+kubectl exec -n assurance elasticsearch-prod-es-data-0 -- curl -s -k -u elastic:${ELASTIC_PASSWORD:-password} "https://localhost:9200/_cat/indices?v" | grep collected
+
+# Recent metrics count
+echo -e "\nRecent Metrics (last hour):"
+kubectl exec -n assurance elasticsearch-prod-es-data-0 -- curl -s -k -u elastic:${ELASTIC_PASSWORD:-password} "https://localhost:9200/prometheus-collected-metrics-*/_count?q=timestamp:>$(date -d '1 hour ago' +%s)" 2>/dev/null | grep -o '"count":[0-9]*'
+EOF
+
+chmod +x monitor_prometheus_collector.sh
+```
+
+### 5.2 Script de Troubleshooting
+
+```bash
+cat > troubleshoot_collector.sh << 'EOF'
+#!/bin/bash
+echo "=== Troubleshooting Prometheus Collector ==="
+
+# Check connectivity
+echo "1. Testing Prometheus connectivity:"
+kubectl exec -n assurance deployment/prometheus-metrics-collector -- python3 -c "
+import requests
+try:
+    r = requests.get('http://prometheus-server.assurance.svc.cluster.local:9090/api/v1/query?query=up', timeout=10)
+    print(f'✅ Prometheus: {r.status_code}')
+except Exception as e:
+    print(f'❌ Prometheus: {e}')
+"
+
+echo -e "\n2. Testing Fluentd connectivity:"
+kubectl exec -n assurance deployment/prometheus-metrics-collector -- python3 -c "
+import requests, json
+try:
+    test_data = {'test': 'troubleshoot', 'timestamp': 1234567890}
+    r = requests.post('http://fluentd.assurance.svc.cluster.local:9888', json=test_data, timeout=10)
+    print(f'✅ Fluentd: {r.status_code}')
+except Exception as e:
+    print(f'❌ Fluentd: {e}')
+"
+
+echo -e "\n3. Service endpoints:"
+kubectl get endpoints -n assurance | grep -E "(fluentd|prometheus)"
+
+echo -e "\n4. Recent collector logs:"
+kubectl logs -n assurance -l app=prometheus-metrics-collector --tail=20 | grep -E "(ERROR|WARN|INFO.*cycle)"
+
+echo -e "\n5. Recent fluentd logs:"
+kubectl logs -n assurance -l app=fluentd --tail=20 | grep -E "(prometheus|9888|ERROR)"
+
+echo -e "\n6. Resource usage:"
+kubectl top pods -n assurance | grep -E "(prometheus|fluentd)"
+EOF
+
+chmod +x troubleshoot_collector.sh
+```
+
+---
+
+## FASE 6: CONFIGURACIÓN EN KIBANA/GRAFANA
+
+### 6.1 Index Pattern en Kibana
 
 1. Acceder a Kibana: `http://kibana-url`
 2. Management → Stack Management → Index Patterns
@@ -713,7 +799,6 @@ kubectl exec -n assurance elasticsearch-prod-es-data-0 -- curl -k -u elastic:${E
   },
   "sort": [{"timestamp": {"order": "desc"}}]
 }
-
 ```
 
 ---
@@ -741,136 +826,60 @@ kubectl exec -n assurance elasticsearch-prod-es-data-0 -- curl -k -u elastic:${E
 
 ---
 
-## FASE 5: VERIFICACIÓN Y TESTING
+## TROUBLESHOOTING COMÚN
 
-### 5.1 Verificar Acceso al Script
-
-```bash
-# Seleccionar un pod de Fluentd
-FLUENTD_POD=$(kubectl get pods -n assurance -l app=fluentd -o jsonpath='{.items[0].metadata.name}')
-echo "Using pod: $FLUENTD_POD"
-
-# Verificar que el script existe y tiene permisos
-kubectl exec -n assurance $FLUENTD_POD -- ls -la /opt/scripts/
-kubectl exec -n assurance $FLUENTD_POD -- cat /opt/scripts/collect_prometheus_metrics.sh | head -10
-
-```
-
-### 5.2 Probar Script Manualmente
+### Problema: Colector no inicia
 
 ```bash
-# Ejecutar script manualmente para probar
-kubectl exec -n assurance $FLUENTD_POD -- /opt/scripts/collect_prometheus_metrics.sh | head -5
-
-# Verificar conectividad a Prometheus
-kubectl exec -n assurance $FLUENTD_POD -- curl -s "http://prometheus-server.assurance.svc.cluster.local:9090/api/v1/query?query=up" | head -20
-
+kubectl logs -n assurance -l app=prometheus-metrics-collector
+kubectl describe pod -n assurance -l app=prometheus-metrics-collector
 ```
 
-**Resultado esperado:** Script ejecutable, genera JSON válido, Prometheus responde correctamente.
-
-### 5.3 Verificar Logs de Fluentd
+### Problema: No llegan datos a Elasticsearch
 
 ```bash
-# Ver logs en tiempo real de Fluentd
-kubectl logs -n assurance $FLUENTD_POD --tail=100 -f
+# Verificar logs del colector
+kubectl logs -n assurance -l app=prometheus-metrics-collector | grep -i error
 
-# Buscar logs específicos de Prometheus
-kubectl logs -n assurance $FLUENTD_POD | grep -i prometheus
+# Verificar logs de Fluentd
+kubectl logs -n assurance -l app=fluentd | grep -i prometheus
 
-# Verificar errores
-kubectl logs -n assurance $FLUENTD_POD | grep -i error
-
+# Test manual
+kubectl exec -n assurance deployment/prometheus-metrics-collector -- python3 -c "
+import requests, json
+test_data = {'test_manual': True, 'timestamp': 1234567890}
+r = requests.post('http://fluentd.assurance.svc.cluster.local:9888', json=test_data)
+print(f'Status: {r.status_code}')
+"
 ```
 
-**Resultado esperado:** Logs muestran ejecución del script cada 60s, sin errores críticos.
+### Problema: Métricas vacías
+
+```bash
+# Verificar queries de Prometheus manualmente
+kubectl exec -n assurance deployment/prometheus-metrics-collector -- python3 -c "
+import requests
+r = requests.get('http://prometheus-server.assurance.svc.cluster.local:9090/api/v1/query?query=up')
+print(r.json())
+"
+```
 
 ---
 
-## FASE 6: VERIFICACIÓN EN ELASTICSEARCH
+## CONCLUSIÓN
 
-### 6.1 Verificar Creación de Índices
+Esta implementación proporciona:
 
-```bash
-# Obtener credenciales de Elasticsearch (si están en secret)
-ELASTIC_PASSWORD=$(kubectl get secret -n assurance elasticsearch-prod-es-elastic-user -o jsonpath='{.data.elastic}' | base64 -d)
+- ✅ Colector dedicado y robusto en Python
+- ✅ Separación clara de responsabilidades
+- ✅ Health checks y monitoring integrado
+- ✅ 16 métricas diferentes de CPU, memoria, pods y nodos
+- ✅ Datos estructurados en Elasticsearch
+- ✅ Escalable y mantenible
+- ✅ Arquitectura similar a Lens Metrics
 
-# Verificar índices creados
-kubectl exec -n assurance elasticsearch-prod-es-data-0 -- curl -k -u elastic:$ELASTIC_PASSWORD "https://localhost:9200/_cat/indices?v" | grep prometheus
+**Frecuencia de recolección:** 60 segundos  
+**Índices generados:** `prometheus-collected-metrics-YYYY.MM.DD`  
+**Retención:** Configurable en Elasticsearch
 
-```
-
-### 6.2 Verificar Documentos
-
-```bash
-# Contar documentos en índices de Prometheus
-kubectl exec -n assurance elasticsearch-prod-es-data-0 -- curl -k -u elastic:$ELASTIC_PASSWORD "https://localhost:9200/prometheus-metrics-*/_count?pretty"
-
-# Ver muestra de documentos
-kubectl exec -n assurance elasticsearch-prod-es-data-0 -- curl -k -u elastic:$ELASTIC_PASSWORD "https://localhost:9200/prometheus-metrics-*/_search?size=1&pretty"
-
-```
-
-### 6.3 Queries Específicas
-
-```bash
-# CPU usage por nodo
-kubectl exec -n assurance elasticsearch-prod-es-data-0 -- curl -k -u elastic:$ELASTIC_PASSWORD "https://localhost:9200/prometheus-metrics-*/_search?q=metric_name:cpu_usage_by_node&size=3&pretty"
-
-# Pods no programables
-kubectl exec -n assurance elasticsearch-prod-es-data-0 -- curl -k -u elastic:$ELASTIC_PASSWORD "https://localhost:9200/prometheus-metrics-*/_search?q=metric_name:unschedulable_pods&size=1&pretty"
-
-# Estado de nodos
-kubectl exec -n assurance elasticsearch-prod-es-data-0 -- curl -k -u elastic:$ELASTIC_PASSWORD "https://localhost:9200/prometheus-metrics-*/_search?q=metric_name:nodes_not_ready&size=1&pretty"
-
-```
-
-**Resultado esperado:** Índices creados (`prometheus-metrics-YYYY.MM.DD`), documentos presentes, datos de métricas estructurados.
-
----
-
-## FASE 7: CONFIGURACIÓN EN KIBANA/GRAFANA
-
-### 7.1 Crear Index Pattern en Kibana
-
-1. Acceder a Kibana
-2. Management → Stack Management → Index Patterns
-3. Crear pattern: `prometheus-metrics-*`
-4. Time field: `datetime` o `timestamp`
-
-### 7.2 Dashboards Básicos
-
-```json
-# Query para visualización de CPU por nodo
-{
-  "query": {
-    "bool": {
-      "must": [
-        {"term": {"metric_name": "cpu_usage_by_node"}},
-        {"term": {"status": "success"}},
-        {"range": {"timestamp": {"gte": "now-1h"}}}
-      ]
-    }
-  },
-  "aggs": {
-    "by_node": {
-      "terms": {
-        "field": "result.metric.instance",
-        "size": 10
-      },
-      "aggs": {
-        "latest_value": {
-          "top_hits": {
-            "sort": [{"timestamp": {"order": "desc"}}],
-            "size": 1,
-            "_source": ["result.value", "timestamp"]
-          }
-        }
-      }
-    }
-  }
-}
-
-```
-
----
+Ejecuta los scripts de monitoreo regularmente para asegurar el correcto funcionamiento del sistema.
