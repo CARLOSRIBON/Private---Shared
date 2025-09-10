@@ -75,7 +75,7 @@ data:
         def __init__(self):
             self.session = requests.Session()
             self.session.timeout = 30
-            
+
             # Definir queries de métricas (igual que antes)
             self.queries = {
                 "cpu_usage_by_node": {
@@ -105,26 +105,26 @@ data:
                 params = {'query': query, 'time': int(time.time())}
                 response = self.session.get(f"{PROMETHEUS_URL}/api/v1/query", params=params)
                 response.raise_for_status()
-                
+
                 data = response.json()
                 if data.get('status') == 'success':
                     return data.get('data', {})
                 else:
                     logger.error(f"Prometheus query failed: {data.get('error')}")
                     return None
-                    
+
             except Exception as e:
                 logger.error(f"Error querying Prometheus: {e}")
                 return None
 
         def format_metric(self, metric_name: str, query_info: Dict, prometheus_data: Optional[Dict]) -> Dict:
             timestamp = int(time.time())
-            
+
             # Obtener tiempo en Guatemala
             guatemala_time = datetime.now(guatemala_tz)
             datetime_iso = guatemala_time.strftime("%Y-%m-%dT%H:%M:%S.%3fZ")
             datetime_local = guatemala_time.strftime("%Y-%m-%d %H:%M:%S %Z")
-            
+
             base_data = {
                 "timestamp": timestamp,
                 "datetime": datetime_iso,
@@ -137,7 +137,7 @@ data:
                 "environment": "production",
                 "source": "prometheus_metrics_collector"
             }
-            
+
             if prometheus_data and prometheus_data.get('result'):
                 base_data.update({
                     "status": "success",
@@ -150,7 +150,7 @@ data:
                     "result_count": 0,
                     "results": []
                 })
-                
+
             return base_data
 
         def send_to_fluentd(self, data: Dict) -> bool:
@@ -162,7 +162,7 @@ data:
                 )
                 response.raise_for_status()
                 return True
-                
+
             except Exception as e:
                 logger.error(f"Error sending to Fluentd: {e}")
                 return False
@@ -170,25 +170,25 @@ data:
         def collect_and_send_all_metrics(self) -> int:
             guatemala_time = datetime.now(guatemala_tz)
             logger.info(f"Starting metrics collection cycle - Guatemala time: {guatemala_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-            
+
             successful_collections = 0
-            
+
             for metric_name, query_info in self.queries.items():
                 try:
                     prometheus_data = self.query_prometheus(query_info["query"])
                     formatted_data = self.format_metric(metric_name, query_info, prometheus_data)
-                    
+
                     if self.send_to_fluentd(formatted_data):
                         successful_collections += 1
                         logger.debug(f"Successfully collected and sent: {metric_name}")
                     else:
                         logger.warning(f"Failed to send metric: {metric_name}")
-                        
+
                 except Exception as e:
                     logger.error(f"Error processing metric {metric_name}: {e}")
-                
+
                 time.sleep(0.5)
-            
+
             logger.info(f"Collection cycle complete: {successful_collections}/{len(self.queries)} metrics sent")
             return successful_collections
 
@@ -196,20 +196,20 @@ data:
             guatemala_time = datetime.now(guatemala_tz)
             logger.info(f"Starting Prometheus Metrics Collector - Guatemala time: {guatemala_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
             logger.info(f"Collection interval: {COLLECTION_INTERVAL}s")
-            
+
             while True:
                 try:
                     start_time = time.time()
                     successful_collections = self.collect_and_send_all_metrics()
-                    
+
                     execution_time = time.time() - start_time
                     logger.info(f"Cycle completed in {execution_time:.2f}s")
-                    
+
                     sleep_time = max(0, COLLECTION_INTERVAL - execution_time)
                     if sleep_time > 0:
                         logger.debug(f"Sleeping for {sleep_time:.2f}s")
                         time.sleep(sleep_time)
-                        
+
                 except KeyboardInterrupt:
                     logger.info("Received shutdown signal")
                     break
@@ -219,16 +219,16 @@ data:
 
     if __name__ == "__main__":
         collector = PrometheusMetricsCollector()
-        
+
         # Test inicial con hora de Guatemala
         guatemala_time = datetime.now(guatemala_tz)
         logger.info(f"Collector starting at Guatemala time: {guatemala_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-        
+
         test_result = collector.query_prometheus('up')
         if test_result is None:
             logger.error("Cannot connect to Prometheus. Exiting.")
             exit(1)
-        
+
         logger.info("Successfully connected to Prometheus")
         collector.run_continuous()
 EOF
@@ -720,23 +720,157 @@ kubectl exec -n assurance elasticsearch-prod-es-data-0 -- curl -k -u elastic:${E
 
 ## MÉTRICAS DISPONIBLES
 
-| Categoría | Métrica | Descripción |
-| --- | --- | --- |
-| **CPU** | `cpu_usage_by_node` | % uso CPU por nodo |
-|  | `cpu_allocatable_by_node` | CPU asignable por nodo |
-|  | `cpu_requests_by_node` | CPU solicitado por nodo |
-| **Memoria** | `memory_usage_by_node` | % uso memoria por nodo |
-|  | `memory_total_by_node` | Memoria total por nodo |
-|  | `memory_allocatable_by_node` | Memoria asignable por nodo |
-|  | `memory_requests_by_node` | Memoria solicitada por nodo |
-| **Pods** | `unschedulable_pods` | Pods no programables |
-|  | `pending_pods` | Pods pendientes |
-|  | `pending_pods_by_namespace` | Pods pendientes por namespace |
-| **Nodos** | `nodes_not_ready` | Nodos no listos |
-|  | `nodes_memory_pressure` | Nodos con presión memoria |
-|  | `nodes_disk_pressure` | Nodos con presión disco |
-| **Cluster** | `cluster_nodes_total` | Total nodos |
-|  | `cluster_pods_total` | Total pods |
-|  | `cluster_cpu_allocatable_total` | Total CPU disponible |
+| Categoría   | Métrica                         | Descripción                   |
+| ----------- | ------------------------------- | ----------------------------- |
+| **CPU**     | `cpu_usage_by_node`             | % uso CPU por nodo            |
+|             | `cpu_allocatable_by_node`       | CPU asignable por nodo        |
+|             | `cpu_requests_by_node`          | CPU solicitado por nodo       |
+| **Memoria** | `memory_usage_by_node`          | % uso memoria por nodo        |
+|             | `memory_total_by_node`          | Memoria total por nodo        |
+|             | `memory_allocatable_by_node`    | Memoria asignable por nodo    |
+|             | `memory_requests_by_node`       | Memoria solicitada por nodo   |
+| **Pods**    | `unschedulable_pods`            | Pods no programables          |
+|             | `pending_pods`                  | Pods pendientes               |
+|             | `pending_pods_by_namespace`     | Pods pendientes por namespace |
+| **Nodos**   | `nodes_not_ready`               | Nodos no listos               |
+|             | `nodes_memory_pressure`         | Nodos con presión memoria     |
+|             | `nodes_disk_pressure`           | Nodos con presión disco       |
+| **Cluster** | `cluster_nodes_total`           | Total nodos                   |
+|             | `cluster_pods_total`            | Total pods                    |
+|             | `cluster_cpu_allocatable_total` | Total CPU disponible          |
+
+---
+
+## FASE 5: VERIFICACIÓN Y TESTING
+
+### 5.1 Verificar Acceso al Script
+
+```bash
+# Seleccionar un pod de Fluentd
+FLUENTD_POD=$(kubectl get pods -n assurance -l app=fluentd -o jsonpath='{.items[0].metadata.name}')
+echo "Using pod: $FLUENTD_POD"
+
+# Verificar que el script existe y tiene permisos
+kubectl exec -n assurance $FLUENTD_POD -- ls -la /opt/scripts/
+kubectl exec -n assurance $FLUENTD_POD -- cat /opt/scripts/collect_prometheus_metrics.sh | head -10
+
+```
+
+### 5.2 Probar Script Manualmente
+
+```bash
+# Ejecutar script manualmente para probar
+kubectl exec -n assurance $FLUENTD_POD -- /opt/scripts/collect_prometheus_metrics.sh | head -5
+
+# Verificar conectividad a Prometheus
+kubectl exec -n assurance $FLUENTD_POD -- curl -s "http://prometheus-server.assurance.svc.cluster.local:9090/api/v1/query?query=up" | head -20
+
+```
+
+**Resultado esperado:** Script ejecutable, genera JSON válido, Prometheus responde correctamente.
+
+### 5.3 Verificar Logs de Fluentd
+
+```bash
+# Ver logs en tiempo real de Fluentd
+kubectl logs -n assurance $FLUENTD_POD --tail=100 -f
+
+# Buscar logs específicos de Prometheus
+kubectl logs -n assurance $FLUENTD_POD | grep -i prometheus
+
+# Verificar errores
+kubectl logs -n assurance $FLUENTD_POD | grep -i error
+
+```
+
+**Resultado esperado:** Logs muestran ejecución del script cada 60s, sin errores críticos.
+
+---
+
+## FASE 6: VERIFICACIÓN EN ELASTICSEARCH
+
+### 6.1 Verificar Creación de Índices
+
+```bash
+# Obtener credenciales de Elasticsearch (si están en secret)
+ELASTIC_PASSWORD=$(kubectl get secret -n assurance elasticsearch-prod-es-elastic-user -o jsonpath='{.data.elastic}' | base64 -d)
+
+# Verificar índices creados
+kubectl exec -n assurance elasticsearch-prod-es-data-0 -- curl -k -u elastic:$ELASTIC_PASSWORD "https://localhost:9200/_cat/indices?v" | grep prometheus
+
+```
+
+### 6.2 Verificar Documentos
+
+```bash
+# Contar documentos en índices de Prometheus
+kubectl exec -n assurance elasticsearch-prod-es-data-0 -- curl -k -u elastic:$ELASTIC_PASSWORD "https://localhost:9200/prometheus-metrics-*/_count?pretty"
+
+# Ver muestra de documentos
+kubectl exec -n assurance elasticsearch-prod-es-data-0 -- curl -k -u elastic:$ELASTIC_PASSWORD "https://localhost:9200/prometheus-metrics-*/_search?size=1&pretty"
+
+```
+
+### 6.3 Queries Específicas
+
+```bash
+# CPU usage por nodo
+kubectl exec -n assurance elasticsearch-prod-es-data-0 -- curl -k -u elastic:$ELASTIC_PASSWORD "https://localhost:9200/prometheus-metrics-*/_search?q=metric_name:cpu_usage_by_node&size=3&pretty"
+
+# Pods no programables
+kubectl exec -n assurance elasticsearch-prod-es-data-0 -- curl -k -u elastic:$ELASTIC_PASSWORD "https://localhost:9200/prometheus-metrics-*/_search?q=metric_name:unschedulable_pods&size=1&pretty"
+
+# Estado de nodos
+kubectl exec -n assurance elasticsearch-prod-es-data-0 -- curl -k -u elastic:$ELASTIC_PASSWORD "https://localhost:9200/prometheus-metrics-*/_search?q=metric_name:nodes_not_ready&size=1&pretty"
+
+```
+
+**Resultado esperado:** Índices creados (`prometheus-metrics-YYYY.MM.DD`), documentos presentes, datos de métricas estructurados.
+
+---
+
+## FASE 7: CONFIGURACIÓN EN KIBANA/GRAFANA
+
+### 7.1 Crear Index Pattern en Kibana
+
+1. Acceder a Kibana
+2. Management → Stack Management → Index Patterns
+3. Crear pattern: `prometheus-metrics-*`
+4. Time field: `datetime` o `timestamp`
+
+### 7.2 Dashboards Básicos
+
+```json
+# Query para visualización de CPU por nodo
+{
+  "query": {
+    "bool": {
+      "must": [
+        {"term": {"metric_name": "cpu_usage_by_node"}},
+        {"term": {"status": "success"}},
+        {"range": {"timestamp": {"gte": "now-1h"}}}
+      ]
+    }
+  },
+  "aggs": {
+    "by_node": {
+      "terms": {
+        "field": "result.metric.instance",
+        "size": 10
+      },
+      "aggs": {
+        "latest_value": {
+          "top_hits": {
+            "sort": [{"timestamp": {"order": "desc"}}],
+            "size": 1,
+            "_source": ["result.value", "timestamp"]
+          }
+        }
+      }
+    }
+  }
+}
+
+```
 
 ---
