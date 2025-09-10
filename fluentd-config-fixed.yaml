@@ -1,0 +1,211 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluentd-config
+  namespace: assurance
+data:
+  fluent.conf: |
+    <source>
+      @type monitor_agent
+      bind 0.0.0.0
+      port 24231
+    </source>
+
+    <label @FLUENT_LOG>
+      <match fluent.**>
+        @type null
+      </match>
+    </label>
+
+    # === HTTP INPUT PARA COLECTOR DE MÉTRICAS ===
+    <source>
+      @type http
+      @id prometheus_metrics_input
+      tag prometheus.collected
+      port 9888
+      bind 0.0.0.0
+      body_size_limit 32m
+      keepalive_timeout 10s
+      add_http_headers false
+      <parse>
+        @type json
+        time_key timestamp
+        time_type unixtime
+      </parse>
+    </source>
+
+    # Filtro para enriquecer métricas del colector
+    <filter prometheus.collected>
+      @type record_transformer
+      enable_ruby true
+      <record>
+        received_at ${Time.now.strftime("%Y-%m-%dT%H:%M:%S.%3NZ")}
+        fluentd_node "#{ENV['K8S_NODE_NAME']}"
+        source_type "external_collector"
+      </record>
+    </filter>
+
+    <match prometheus.collected>
+      @type elasticsearch
+      @id out_es_prometheus_collected
+      @log_level info
+      include_tag_key true
+      host "#{ENV['FLUENT_ELASTICSEARCH_HOST'] || 'elasticsearch-sandbox-es-internal-http.assurance.svc.cluster.local'}"
+      port "#{ENV['FLUENT_ELASTICSEARCH_PORT'] || '9200'}"
+      path "#{ENV['FLUENT_ELASTICSEARCH_PATH']}"
+      scheme "#{ENV['FLUENT_ELASTICSEARCH_SCHEME'] || 'https'}"
+      ssl_verify "#{ENV['FLUENT_ELASTICSEARCH_SSL_VERIFY'] || 'false'}"
+      ssl_version "#{ENV['FLUENT_ELASTICSEARCH_SSL_VERSION'] || 'TLSv1_2'}"
+      user "#{ENV['FLUENT_ELASTICSEARCH_USER'] || use_default}"
+      password "#{ENV['FLUENT_ELASTICSEARCH_PASSWORD'] || use_default}"
+    
+      logstash_prefix "prometheus-metrics"
+      logstash_dateformat "%Y.%m.%d"
+      logstash_format true
+      index_name "prometheus-collected-metrics-%Y.%m.%d"
+      type_name "collected_prometheus_metric"
+
+      <buffer>
+        @type file
+        path /var/log/fluentd-buffers/prometheus.collected.buffer
+        flush_thread_count 2
+        flush_interval 20s
+        chunk_limit_size 2M
+        queue_limit_length 32
+        retry_max_interval 30
+        retry_forever true
+      </buffer>
+    </match>
+
+    # === CONFIGURACIÓN EXISTENTE DE LOGS ===
+    <match kubernetes.var.log.containers.**fluentd**.log>
+      @type null
+    </match>
+
+    <match kubernetes.var.log.containers.**kube-system**.log>
+      @type null
+    </match>
+
+    <match kubernetes.var.log.containers.**kibana**.log>
+      @type null
+    </match>
+
+    <source>
+      @type tail
+      path /var/log/containers/*.log
+      pos_file fluentd-docker.pos
+      tag kubernetes.*
+      <parse>
+        @type multi_format
+        <pattern>
+          format json
+          time_key time
+          time_type string
+          time_format "%Y-%m-%dT%H:%M:%S.%NZ"
+          keep_time_key false
+        </pattern>
+        <pattern>
+          format regexp
+          expression /^(?<time>[^ ]+) (?<stream>stdout|stderr)( (?<logtag>[^ ]+))? (?<log>.*)$/
+          time_format '%Y-%m-%dT%H:%M:%S.%N%:z'
+          keep_time_key false
+        </pattern>
+        <pattern>
+          format none
+          message_key log
+        </pattern>
+      </parse>
+    </source>
+
+    <filter kubernetes.var.log.containers.**>
+      @type kubernetes_metadata
+      @id filter_kube_metadata
+    </filter>
+
+    # PARSER MEJORADO - Maneja logs que no son JSON
+    <filter kubernetes.var.log.containers.**>
+      @type parser
+      <parse>
+        @type multi_format
+        <pattern>
+          format json
+          time_key time
+          time_type string
+          time_format "%Y-%m-%dT%H:%M:%S.%NZ"
+          keep_time_key false
+        </pattern>
+        <pattern>
+          format regexp
+          expression /^(?<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}) - (?<level>\w+) - (?<message>.*)$/
+          time_key timestamp
+          time_format "%Y-%m-%d %H:%M:%S,%L"
+        </pattern>
+        <pattern>
+          format none
+          message_key message
+        </pattern>
+      </parse>
+      key_name log
+      replace_invalid_sequence true
+      emit_invalid_record_to_error false
+      reserve_data true
+      reserve_time true
+    </filter>
+
+    # Filtro adicional para enriquecer logs del prometheus-metrics-collector
+    <filter kubernetes.var.log.containers.prometheus-metrics-collector**>
+      @type record_transformer
+      enable_ruby true
+      <record>
+        log_type "prometheus_collector"
+        parsed_log ${record.dig("log") || record.dig("message") || ""}
+      </record>
+    </filter>
+
+    <filter kubernetes.var.log.containers.**>
+      @type grep
+      <exclude>
+        key $.kubernetes.namespace_name
+        pattern /^(argo-rollouts|argocd|assurance|commvault|data-services|elastic-system|falco|hpa-test|infinispan|iptables-istio|istio-ingress|istio-system|kafka|kube-node-lease|kube-public|kube-system|lifecycle|nifi|nifi-cluster|observability|policy|rabbitmq|redis|mongodb|olm|scaling|security|trivy|vault)$/
+      </exclude>
+    </filter>
+
+    <match **>
+        @type elasticsearch
+        @id out_es
+        @log_level info
+        include_tag_key true
+        host "#{ENV['FLUENT_ELASTICSEARCH_HOST'] || 'elasticsearch-sandbox-es-internal-http.assurance.svc.cluster.local'}"
+        port "#{ENV['FLUENT_ELASTICSEARCH_PORT'] || '9200'}"
+        path "#{ENV['FLUENT_ELASTICSEARCH_PATH']}"
+        scheme "#{ENV['FLUENT_ELASTICSEARCH_SCHEME'] || 'https'}"
+        ssl_verify "#{ENV['FLUENT_ELASTICSEARCH_SSL_VERIFY'] || 'false'}"
+        ssl_version "#{ENV['FLUENT_ELASTICSEARCH_SSL_VERSION'] || 'TLSv1_2'}"
+        user "#{ENV['FLUENT_ELASTICSEARCH_USER'] || use_default}"
+        password "#{ENV['FLUENT_ELASTICSEARCH_PASSWORD'] || use_default}"
+        reload_connections "#{ENV['FLUENT_ELASTICSEARCH_RELOAD_CONNECTIONS'] || 'false'}"
+        reconnect_on_error "#{ENV['FLUENT_ELASTICSEARCH_RECONNECT_ON_ERROR'] || 'true'}"
+        reload_on_failure "#{ENV['FLUENT_ELASTICSEARCH_RELOAD_ON_FAILURE'] || 'true'}"
+        log_es_400_reason "#{ENV['FLUENT_ELASTICSEARCH_LOG_ES_400_REASON'] || 'false'}"
+        logstash_prefix "#{ENV['FLUENT_ELASTICSEARCH_LOGSTASH_PREFIX'] || 'kubernetes-logs-sandbox'}"
+        logstash_dateformat "#{ENV['FLUENT_ELASTICSEARCH_LOGSTASH_DATEFORMAT'] || '%Y.%m.%d'}"
+        logstash_format "#{ENV['FLUENT_ELASTICSEARCH_LOGSTASH_FORMAT'] || 'true'}"
+        index_name "#{ENV['FLUENT_ELASTICSEARCH_LOGSTASH_INDEX_NAME'] || 'kubernetes-logs-sandbox'}"
+        type_name "#{ENV['FLUENT_ELASTICSEARCH_LOGSTASH_TYPE_NAME'] || 'fluentd'}"
+        include_timestamp "#{ENV['FLUENT_ELASTICSEARCH_INCLUDE_TIMESTAMP'] || 'false'}"
+        template_name "#{ENV['FLUENT_ELASTICSEARCH_TEMPLATE_NAME'] || use_nil}"
+        template_file "#{ENV['FLUENT_ELASTICSEARCH_TEMPLATE_FILE'] || use_nil}"
+        template_overwrite "#{ENV['FLUENT_ELASTICSEARCH_TEMPLATE_OVERWRITE'] || use_default}"
+        sniffer_class_name "#{ENV['FLUENT_SNIFFER_CLASS_NAME'] || 'Fluent::Plugin::ElasticsearchSimpleSniffer'}"
+        request_timeout "#{ENV['FLUENT_ELASTICSEARCH_REQUEST_TIMEOUT'] || '30s'}"
+        <buffer>
+          @type file
+          path /var/log/fluentd-buffers/kubernetes.system.buffer
+          flush_thread_count "#{ENV['FLUENT_ELASTICSEARCH_BUFFER_FLUSH_THREAD_COUNT'] || '8'}"
+          flush_interval "#{ENV['FLUENT_ELASTICSEARCH_BUFFER_FLUSH_INTERVAL'] || '10s'}"
+          chunk_limit_size "#{ENV['FLUENT_ELASTICSEARCH_BUFFER_CHUNK_LIMIT_SIZE'] || '2M'}"
+          queue_limit_length "#{ENV['FLUENT_ELASTICSEARCH_BUFFER_QUEUE_LIMIT_LENGTH'] || '32'}"
+          retry_max_interval "#{ENV['FLUENT_ELASTICSEARCH_BUFFER_RETRY_MAX_INTERVAL'] || '30'}"
+          retry_forever true
+        </buffer>
+      </match>
